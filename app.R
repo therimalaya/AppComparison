@@ -411,7 +411,7 @@ server <- function(input, output) {
   ## Prediction Error Data ----
   pred_data <- reactive({
     if (subset() != "") {
-      pred_data_minimum %>% filter_(subset)
+      pred_data_minimum %>% filter_(subset())
     } else {
       pred_data_minimum
     }
@@ -434,7 +434,7 @@ server <- function(input, output) {
   ## Estimation Error Data ----
   est_data <- reactive({
     if (subset() != "") {
-      est_data_minimum <- est_data_minimum %>% filter_(subset)
+      est_data_minimum <- est_data_minimum %>% filter_(subset())
     } else {
       est_data_minimum
     }
