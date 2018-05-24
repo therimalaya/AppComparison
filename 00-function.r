@@ -485,6 +485,75 @@ err_plot <- function(coef_error, error_type = "Prediction", ncomp = NULL) {
   return(plt)
 }
 
+## Effect Plot ----
+eff_mlm <- function(focal.predictors, mod, response, ...)  {
+  if (missing(response)) {
+    mod.frame <- model.frame(mod)
+    response <- colnames(model.response(mod.frame))
+  } else if (is.numeric(response)) {
+    mod.frame <- model.frame(mod)
+    response.names <- colnames(model.response(mod.frame))
+    response <- response.names[response]
+  }
+  data <- cbind(model.response(mod.frame), mod.frame[-1])
+  if (length(response) == 1) {
+    mod.1 <- update(mod, as.formula(paste(response, " ~ .")))
+    result <- Effect(focal.predictors, mod.1, ...)
+  } else {
+    result <- as.list(NULL)
+    for (resp in response) {
+      preds <- paste(attr(mod$terms, 'term.labels'), collapse = " + ")
+      fn <- eval(mod$call[[1]])
+      mod.1 <- fn(as.formula(paste(resp, " ~ ", preds)), data = data)
+      lab <- resp
+      result[[lab]] <- effects::effect(focal.predictors, mod.1)
+    }
+    class(result) <- "efflist"
+  }
+  result
+}
+eff_plot <- function(term, model, title = "Prediction Error", show_errorbar = FALSE){
+  ## Identify correct term ----
+  trms <- strsplit(term, ":")[[1]]
+  order <- length(trms)
+  possible_terms <- unlist(combinat::permn(trms, fun = paste0, collapse = ":"))
+  term_labels <- attr(model$terms, "term.labels")
+  term <- possible_terms[possible_terms %in% term_labels]
+  eff_df <- map_df(suppressMessages(eff_mlm(term, model)),
+                   as.data.frame, .id = "Response") %>%
+    as.tibble()
+  if ("Method" %in% trms) {
+    mthd_idx <- which(trms %in% "Method")
+    trms <- c(trms[mthd_idx], trms[-mthd_idx])
+  }
+  facet_formula <- if (length(trms) == 3) {
+    paste(c("Response", trms[-c(1:2)]), collapse = " ~ ")
+  } else if (length(trms) == 2) {
+    paste(c(".", c("Response", trms[-c(1:2)])), collapse = " ~ ")
+  } else {
+    paste(c("Response", paste(trms[-c(1:2)], collapse = " + ")), collapse = " ~ ")
+  }
+  # sub_title <- as.character(model$call)[2]
+  sub_title <- deparse(model$terms)
+  plt <- eff_df %>%
+    ggplot(aes(reorder(get(trms[1]), fit), fit,
+               color = get(trms[2]), group = get(trms[2]))) +
+    geom_line() + geom_point(size = 0.8) +
+    theme(legend.position = "bottom",
+          plot.subtitle = element_text(family = "mono")) +
+    labs(x = trms[1], y = "Effect", color = trms[2]) +
+    ggtitle(paste("Effect Plot:", title), subtitle = sub_title)
+
+  if (show_errorbar) plt <- plt +
+    geom_errorbar(aes(ymin = lower, ymax = upper, width = 0.1))
+  if (length(trms) > 1) plt <- plt +
+    facet_grid(facet_formula, labeller = label_both)
+  if ("Method" %in% trms) plt <- plt +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+  return(plt)
+}
+
 # ## ---- Very IMPURE Functions ----
 # ## Coefficient Plot ----
 # get_coef <- function(design, method, path = "scripts/robj/coef-error") {
@@ -615,45 +684,5 @@ err_plot <- function(coef_error, error_type = "Prediction", ncomp = NULL) {
 #               aes(label = label, color = Response),
 #               inherit.aes = FALSE, hjust = 1, vjust = v_just) +
 #     geom_point(data = dta_min, fill = "white", shape = 21)
-#   return(plt)
-# }
-# ## Effect Plot ----
-# eff_plot <- function(term, model, title = "Prediction Error", show_errorbar = FALSE){
-#   trms <- strsplit(term, ":")[[1]]
-#   order <- length(trms)
-#   possible_terms <- unlist(combinat::permn(trms, fun = paste0, collapse = ":"))
-#   term_labels <- attr(model$terms, "term.labels")
-#   term <- possible_terms[possible_terms %in% term_labels]
-#   eff_df <- map_df(suppressMessages(effects::effect(term, model)),
-#                    as.data.frame, .id = "Response") %>%
-#     as.tibble()
-#   if ("Method" %in% trms) {
-#     mthd_idx <- which(trms %in% "Method")
-#     trms <- c(trms[mthd_idx], trms[-mthd_idx])
-#   }
-#   facet_formula <- if (length(trms) == 3) {
-#     paste(c("Response", trms[-c(1:2)]), collapse = " ~ ")
-#   } else if (length(trms) == 2) {
-#     paste(c(".", c("Response", trms[-c(1:2)])), collapse = " ~ ")
-#   } else {
-#     paste(c("Response", paste(trms[-c(1:2)], collapse = " + ")), collapse = " ~ ")
-#   }
-#   sub_title <- as.character(model$call)[2]
-#   plt <- eff_df %>%
-#     ggplot(aes(reorder(get(trms[1]), fit), fit,
-#                color = get(trms[2]), group = get(trms[2]))) +
-#     geom_line() + geom_point(size = 0.8) +
-#     theme(legend.position = "bottom",
-#           plot.subtitle = element_text(family = "mono")) +
-#     labs(x = trms[1], y = "Effect", color = trms[2]) +
-#     ggtitle(paste("Effect Plot:", title), subtitle = sub_title)
-# 
-#   if (show_errorbar) plt <- plt +
-#     geom_errorbar(aes(ymin = lower, ymax = upper, width = 0.1))
-#   if (length(trms) > 1) plt <- plt +
-#     facet_grid(facet_formula, labeller = label_both)
-#   if ("Method" %in% trms) plt <- plt +
-#     theme(axis.text.x = element_text(angle = 30, hjust = 1))
-# 
 #   return(plt)
 # }

@@ -2,14 +2,44 @@ library(shiny)
 library(shinythemes)
 library(tidyverse)
 library(shinydashboard)
-library(simrel)
-library(pls)
-library(Renvlp)
-library(glmnet)
 library(DT)
 
 ## Source Function ----
-source("00-function.r")
+source("00-function.r", local = TRUE)
+
+## Prepare Data ----
+## Load Design ----
+load("design.rdata")
+pred_error <- readRDS("prediction-error.rds")
+est_error <- readRDS("estimation-error.rds")
+
+## Prediction Error Data ----
+pred_data <- design_chr %>% 
+  mutate(Design = as.character(1:n())) %>%
+  mutate_at(vars(p, gamma, R2, eta), as.factor) %>%
+  right_join(pred_error, by = "Design") %>%
+  mutate_if(is.character, as.factor) %>%
+  mutate_at("p", as.factor) %>%
+  mutate(Response = paste0("Y", Response))
+
+pred_data_minimum <- pred_data %>%
+  group_by(p, gamma, eta, R2, Replication, Method, Response) %>%
+  summarize(Pred_Error = min(Pred_Error)) %>%
+  spread(Response, Pred_Error)
+
+## Estimation Error Data ----
+est_data <- design_chr %>% 
+  mutate(Design = as.character(1:n())) %>%
+  mutate_at(vars(p, gamma, eta, R2), as.factor) %>%
+  right_join(est_error, by = "Design") %>%
+  mutate_if(is.character, as.factor) %>%
+  mutate_at("p", as.factor) %>%
+  mutate(Response = paste0("Y", Response))
+
+est_data_minimum <- est_data %>%
+  group_by(p, gamma, eta, R2, Replication, Method, Response) %>%
+  summarize(Est_Error = min(Est_Error)) %>%
+  spread(Response, Est_Error)
 
 ## Some Functions ----
 get_coef_error <- function(dgn, rep, mthd, mthd_idx) {
@@ -28,12 +58,9 @@ get_coef_error <- function(dgn, rep, mthd, mthd_idx) {
     )
 }
 
-## Load Design ----
-load("design.rdata")
-
 ## Some Constants ----
 data_path <- "coef-error"
-  
+
 ## For Estimator Selection ----
 methods <- c(
   'Principal Component Regression (PCR)',
@@ -57,35 +84,70 @@ ui <- dashboardPage(
   ## Sidebar----
   sidebar = dashboardSidebar(
     width = 400,
-    fluidPage(
-      theme = shinytheme("yeti"),
-      h3("Design Table"),
-      dataTableOutput("design"),
-      conditionalPanel(
-        condition = 'output.has_selected',
-        h3("Selected Design"),
-        dataTableOutput("selected_design"),
-        fluidRow(
-          fillRow(
-            textInput("rep", "Number of Replication", "1:2", width = '100%'),
-            checkboxGroupInput(
-              inputId = "which_plot", 
-              label = "Which Plot:", 
-              choices = c("Prediction Error" = "pred",
-                          "Estimation Error" = "est",
-                          "Coefficients" = "coef"),
-              selected = c('pred', 'est')),
-            height = '80px'
+    sidebarMenu(
+      ## Explore Menu ----
+      menuItem(
+        "Explore",
+        startExpanded = TRUE,
+        icon = icon("dashboard"),
+        fluidPage(
+          theme = shinytheme("yeti"),
+          h3("Design Table"),
+          dataTableOutput("design"),
+          conditionalPanel(
+            condition = 'output.has_selected',
+            h3("Selected Design"),
+            dataTableOutput("selected_design"),
+            fluidRow(
+              fillRow(
+                textInput("rep", "Number of Replication", "1:2", width = '100%'),
+                checkboxGroupInput(
+                  inputId = "which_plot", 
+                  label = "Which Plot:", 
+                  choices = c("Prediction Error" = "pred",
+                              "Estimation Error" = "est",
+                              "Coefficients" = "coef"),
+                  selected = c('pred', 'est')),
+                height = '80px'
+              )
+            ),
+            fluidRow(
+              selectInput(
+                inputId = "method", 
+                label = "Estimation Method",
+                choices = mthds,
+                multiple = TRUE, 
+                width = '100%'),
+              actionButton("compare", "Compare", icon('random'))
+            )
           )
         ),
-        fluidRow(
-          selectInput(
-            inputId = "method", 
-            label = "Estimation Method",
-            choices = mthds,
-            multiple = TRUE, 
-            width = '100%'),
-          actionButton("compare", "Compare", icon('random'))
+        menuSubItem(
+          "Exploration Results", 
+          tabName = "explore", 
+          selected = TRUE)
+      ),
+      ## Modelling Menu ----
+      menuItem(
+        "Modelling", 
+        icon = icon("puzzle-piece"),
+        fluidPage(
+          theme = shinytheme("yeti"),
+          fluidRow(
+            textAreaInput("model", "Model", width = '350px', height = '50px',
+                          value = "Method * p * eta * gamma * R2",
+                          resize = 'vertical'),
+            # textAreaInput("subset", "Subset Expression", width = '350px', height = '50px',
+            #               value = "", placeholder = "Subset expression for the model.",
+            #               resize = 'vertical'),
+            uiOutput('eff_list'),
+            actionButton("btn_model", "Model")
+          )
+        ),
+        menuSubItem(
+          "Modelling Result",
+          tabName = "modelling",
+          selected = TRUE
         )
       )
     )
@@ -99,9 +161,56 @@ ui <- dashboardPage(
         href = "custom.css"
       )
     ),
-    conditionalPanel(
-      condition = 'input.compare && output.has_selected',
-      uiOutput('my_ui')
+    tabItems(
+      ## Explore Content ----
+      tabItem(
+        tabName = "explore",
+        conditionalPanel(
+          condition = 'input.compare && output.has_selected',
+          uiOutput('my_ui')
+        )
+      ),
+      ## Modelling Content ----
+      tabItem(
+        tabName = "modelling",
+        fluidPage(
+          theme = shinytheme("yeti"),
+          fluidRow(
+            conditionalPanel(
+              condition = 'input.btn_model',
+              # plotOutput("test_plot"),
+              # tabBox(
+              box(
+                title = "Prediction Error Model",
+                value = "pred_tab",
+                verbatimTextOutput('pred_anova')
+              ),
+              box(
+                title = "Estimation Error Model",
+                value = "est_tab",
+                verbatimTextOutput('est_anova')
+              ),
+              #   id = "model_panel",
+              #   title = "Model Dashboard"
+              # ),
+              # tabBox(
+              box(
+                title = "EffectPrediction Model",
+                value = "pred_tab",
+                plotOutput('pred_eff_plot')
+              ),
+              box(
+                title = "Estimation Error Model",
+                value = "est_tab",
+                plotOutput('est_eff_plot')
+              )
+              #   id = "effect_panel",
+              #   title = "Effect Plots"
+              # )
+            )
+          )
+        )
+      )
     )
   )
 )
@@ -109,6 +218,7 @@ ui <- dashboardPage(
 
 ## ---- Server Start ----
 server <- function(input, output) {
+  ## ---- Exploration ----
   ## Design Table ----
   dta <- reactive({
     design_chr %>%
@@ -163,7 +273,6 @@ server <- function(input, output) {
       )
   })
   
-## ---- OFFLINE VERSION ----
   ## Isolate Inputes ----
   rep <- eventReactive(input$compare, {
     out <- try(eval(parse(text = input$rep)), TRUE)
@@ -172,6 +281,7 @@ server <- function(input, output) {
   })
   which_plot <- eventReactive(input$compare, input$which_plot)
   method <- eventReactive(input$compare, input$method)
+  ## Design Grid ----
   design_grid <- eventReactive(input$compare, {
     # req(!is.null(selected_design()))
     # req(input$compare)
@@ -179,10 +289,12 @@ server <- function(input, output) {
     method <- method()
     expand.grid(Design = dgn, Method = method, stringsAsFactors = F)
   })
+  ## Design Name ----
   design_name <- reactive({
     design_grid() %>% 
       pmap_chr(~paste('Design', ..1, ..2, sep = '-'))
   })
+  ## Full File Path ----
   full_path <- reactive({
     fn <- function(dgn, mthd, path) {
       out <- paste("dgn", dgn, tolower(mthd), sep = "-")
@@ -192,17 +304,20 @@ server <- function(input, output) {
       mutate_at(2, tolower) %>% 
       pmap_chr(~fn(..1, ..2, data_path))
   })
+  ## Loading the data ----
   load_data <- reactive({
     path <- full_path()
     out <- map(path, ~get(load(.x)))
     names(out) <- pmap_chr(design_grid(), ~paste("Design", ..1, ..2, sep = "-"))
     out
   })
+  ## Filter the data based on replication ----
   filter_data <- reactive({
     dta <- load_data()
     lapply(dta, "[", rep())
   })
   
+  ## Main Plot UI for prediction and estimation errors and coefficients ----
   tab_ui <- eventReactive(input$compare, {
     mthds <- method()
     mdl_tabs <- lapply(mthds, function(mthd){
@@ -247,11 +362,13 @@ server <- function(input, output) {
     do.call(tabBox, c(mdl_tabs, id = "mdl_tab", width = '100%'))
   })
   
+  ## The main UI output ----
   output$my_ui <- renderUI({
     req(input$compare)
     tab_ui()
   })
   
+  ## Dynamically create plot based on selected criteria ----
   observeEvent(input$compare, {
     for (idx in design_name()) {
       local({
@@ -273,6 +390,67 @@ server <- function(input, output) {
         })
       })
     }
+  })
+  ## ---- Modelling ----
+  ## Selected Model ----
+  ## Model Fitting ----
+  model_formula <- reactive({
+    as.formula(paste("cbind(Y1, Y2, Y3, Y4)", input$model, sep = "~"))
+    # as.formula("cbind(mpg, hp) ~ am + carb + am:carb")
+  })
+  ## Effect term Input ----
+  output$eff_list <- renderUI({
+    textInput("eff", "Effect term", 
+              value = "Method:eta:gamma",
+              width = '100%')
+  })
+  ## Subset expression input ----
+  subset <- reactive({
+    input$subset
+  })
+  ## Prediction Error Data ----
+  pred_data <- reactive({
+    if (subset() != "") {
+      pred_data_minimum %>% filter_(subset)
+    } else {
+      pred_data_minimum
+    }
+  })
+  ## Prediction Error Model ----
+  pred_model <- eventReactive(input$btn_model, {
+    lm(model_formula(), data = pred_data_minimum)
+  })
+  ## Pred Effect Plot ----
+  output$pred_eff_plot <- renderPlot({
+    req(!is.null(pred_model()))
+    eff_plot(input$eff, pred_model())
+  })
+  ## Pred ANOVA ----
+  output$pred_anova <- renderPrint({
+    anova(pred_model())
+  })
+  
+  ## Estimation Error Data ----
+  est_data <- reactive({
+    if (subset() != "") {
+      est_data_minimum <- est_data_minimum %>% filter_(subset)
+    } else {
+      est_data_minimum
+    }
+  })
+  
+  ## Estimation Error Model ----
+  est_model <- eventReactive(input$btn_model, {
+    lm(model_formula(), data = est_data_minimum)
+  })
+  ## Est Effect Plot ----
+  output$est_eff_plot <- renderPlot({
+    req(!is.null(est_model()))
+    eff_plot(input$eff, est_model())
+  })
+  ## Est ANOVA ----
+  output$est_anova <- renderPrint({
+    anova(est_model())
   })
 }
 
