@@ -100,7 +100,7 @@ ui <- dashboardPage(
             dataTableOutput("selected_design"),
             fluidRow(
               fillRow(
-                textInput("rep", "Number of Replication", "1:2", width = '100%'),
+                textInput("rep", "Number of Replication", "1:5", width = '100%'),
                 checkboxGroupInput(
                   inputId = "which_plot",
                   label = "Which Plot:",
