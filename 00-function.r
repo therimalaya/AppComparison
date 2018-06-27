@@ -65,11 +65,17 @@ get_data <- function(sim_obj, need_pc = FALSE, prop = ifelse(need_pc, 0.95, NULL
 }
 
 ## Fit a model with data and method supplied ----
-fit_model <- function(data, method = c("PCR", "PLS1", "PLS2", "Xenv", "Yenv", "Ridge", "Lasso", "Senv")) {
+fit_model <- function(data, method = c("PCR", "PLS1", "PLS2", "Xenv", "Yenv", "Ridge", "Lasso", "Senv", "OLS")) {
   method <- match.arg(method, method)
-  if (method %in% c("Ridge", "Lasso")) require(doParallel)
+  if (method %in% c("Ridge", "Lasso")) {
+    require(parallel)
+    cl <- makeCluster(6, type = "PSOCK")
+    registerDoParallel(cl)
+    on.exit(stopCluster(cl))
+  }
   fit <- switch(
     method,
+    OLS   = lm(y ~ x, data = data),
     PCR   = pcr(y ~ x, data = data, ncomp = 10),
     PLS2  = plsr(y ~ x, data = data, ncomp = 10),
     Xenv  = map(1:min(10, ncol(data$x)), function(nc) with(data, try(xenv(x, y, u = nc)))),
@@ -78,9 +84,9 @@ fit_model <- function(data, method = c("PCR", "PLS1", "PLS2", "Xenv", "Yenv", "R
     Ridge = cv.glmnet(data$x, data$y, family = "mgaussian", alpha = 0, parallel = TRUE, nlambda = 50),
     Lasso = cv.glmnet(data$x, data$y, family = "mgaussian", alpha = 1, parallel = TRUE, nlambda = 50),
     PLS1  = map(1:ncol(data$y), function(i){
-        dta <- data.frame(y = data$y[, i], x = data$x)
-        plsr(y ~ x, data = dta)
-      })
+      dta <- data.frame(y = data$y[, i], x = data$x)
+      plsr(y ~ x, data = dta)
+    })
   )
   class(fit) <- append(class(fit), "fitted_model")
   return(fit)
@@ -90,13 +96,30 @@ fit_model <- function(data, method = c("PCR", "PLS1", "PLS2", "Xenv", "Yenv", "R
 get_beta <- function(method = c('pcr', 'pls', 'cppls', 'mvr', 'xenv',
                                 'cpls', "ridge", "lasso", "senv",
                                 'try-error', "glmnet", "cv.glmnet",
-                                "yenv", "senv", "pls1", 'pls2')){
+                                "yenv", "senv", "pls1", 'pls2', 'ols')){
   mthd <- match.arg(method)
+  if (mthd %in% c('ols', 'lm')) method <- 'ols'
   if (mthd %in% c('pcr', 'pls', 'cppls', 'cpls', 'pls2')) method <- 'mvr'
   if (mthd %in% c("senv", "stenv")) method <- "senv"
   if (mthd %in% c("glmnet", "cv.glmnet", "ridge", "lasso")) method <- "glmnet"
   if (mthd %in% c("try-error")) return(method)
   switch(method,
+         ols    = {
+           coefs <- function(mdl, intercept = TRUE)
+           {
+             coef <- unname(coef(mdl))
+             if (!intercept) coef <- coef[-1, ]
+             dim(coef) <- c(dim(coef), 1)
+             dimnames(coef)[[1]] <- if (intercept) {
+               c('Intercept', paste0("X", 1:(nrow(coef) - 1)))
+             } else {
+               paste0("X", 1:nrow(coef))
+             }
+             dimnames(coef)[[2]] <- paste0("Y", 1:ncol(coef))
+             dimnames(coef)[[3]] <- paste0("Dim", 1:dim(coef)[3])
+             return(coef)
+           }
+         },
          mvr    = {
            coefs <- function(mdl, ncomp = 10, intercept = TRUE)
            {
@@ -191,17 +214,21 @@ get_beta <- function(method = c('pcr', 'pls', 'cppls', 'mvr', 'xenv',
          })
   return(coefs)
 }
-get_est_beta <- function(fit, model_name, beta_fun = get_beta(tolower(model_name)), rotation_mat = NULL, intercept = TRUE) {
+get_est_beta <- function(fit, model_name, beta_fun = get_beta(tolower(model_name)), 
+                         rotation_mat = NULL, intercept = TRUE) {
   if (!is.null(rotation_mat)) {
     out <- beta_fun(fit, intercept = intercept)
-    tmp <- array(dim = c(dim(rotation_mat)[1], dim(out)[-1]))
-    for (idx in seq.int(dim(out)[3])) {
-      tmp[, , idx] <- rotation_mat %*% out[, , idx]
-    }
-    dnames <- dimnames(out)
-    dnames[[1]] <- paste0("X", 1:dim(tmp)[1])
-    dimnames(tmp) <- dnames
-    out <- tmp
+    out <- apply(out, 2:3, function(x) rotation_mat %*% x)
+    dimnames(out)[[1]] <- paste0("X", 1:dim(out)[1])
+    # browser()
+    # tmp <- array(dim = c(dim(rotation_mat)[1], dim(out)[-1]))
+    # for (idx in seq.int(dim(out)[3])) {
+    #   tmp[, , idx] <- rotation_mat %*% out[, , idx]
+    # }
+    # dnames <- dimnames(out)
+    # dnames[[1]] <- paste0("X", 1:dim(tmp)[1])
+    # dimnames(tmp) <- dnames
+    # out <- tmp
   } else {
     out <- beta_fun(fit, intercept = intercept)
   }
@@ -276,14 +303,19 @@ coef_errors <- function(sim_obj, est_method, ...) {
     fit_model(est_method) %>%
     get_est_beta(tolower(est_method), rotation_mat = rot, intercept = FALSE)
   coef <- compute_intercept(coef, Xmeans, Ymeans)
-
+  
   ## True and Estimated Coefficient Data Frame ----
   coef_df <- reshape2::melt(coef, varnames = c("Predictor", "Response", "Components"), value.name = "Estimated")
   true_coef <- get_true_value(sim_obj, "coef")
   true_coef_df <- reshape2::melt(true_coef, varnames = c("Predictor", "Response"), value.name = "True")
-  coef_df <- coef_df %>% spread(Components, Estimated) %>% left_join(true_coef_df, by = c("Predictor", "Response"))
+  if (!(est_method %in% c('Lasso', 'Ridge'))) {
+    coef_df <- coef_df %>% spread(Components, Estimated)
+  }
+  coef_df <- coef_df %>% 
+    left_join(true_coef_df, by = c("Predictor", "Response")) %>% 
+    as_tibble()
   class(coef_df) <- append(class(coef_df), "coefficient_df")
-
+  
   ## Prediction Error ----
   pred_err <- coef %>%
     getPredErr(
@@ -292,12 +324,12 @@ coef_errors <- function(sim_obj, est_method, ...) {
       sigma = get_true_value(sim_obj, "sigma_x")
     )
   class(pred_err) <- append(class(pred_err), "prediction_error_df")
-
+  
   ## Estimation Error ----
   est_err <- coef %>%
     getEstErr(trueBeta = get_true_value(sim_obj, "coef"))
   class(est_err) <- append(class(est_err), "estimation_error_df")
-
+  
   out <- list(
     coefficients = coef_df,
     prediction_error = pred_err,
@@ -325,86 +357,73 @@ coef_errors <- function(sim_obj, est_method, ...) {
 
 ## Complete the following function making it pure but compatible with impure functions -----------
 ## Coefficient Plot ----
-coef_df <- function(coef_mat) {
-  ret <- coef_mat %>%
-    gather(Tuning_Param, Coef, -c(1:2, ncol(coef_mat))) %>%
-    mutate_at("Tuning_Param", get_integer) %>%
-    mutate_if(is.factor, as.character) %>%
-    as_tibble()
-  return(ret)
-}
 coef_plot <- function(coef_error, ncomp = NULL, err_type = "prediction") {
+  ## Check if it is nested ----
   not_nested <- "coefficient_error" %in% class(coef_error)
   if (not_nested) coef_error <- list(coef_error)
-  ncomp <- if (length(ncomp) == 1 & !is.null(ncomp)) 1:ncomp else 1:5
+  
+  ## Is a shrinkage method ----
   method <- map_chr(coef_error, attr, "Method") %>% unique()
   is_shrinkage <- method %in% c("Ridge", "Lasso")
-  if (!not_nested) n_rep <- length(coef_error)
-
+  
+  ## Coefficients ----
   coef_mat <- map(coef_error, 'coefficients')
-  coef <- map_df(coef_mat, coef_df, .id = "Replication")
-
-  group_vars <- c("Predictor", "Response", "Est_type")
-
-  if (is_shrinkage) {
-    error_type <- switch(
-      err_type,
-      prediction = "prediction_error",
-      estimation = "estimation_error")
-
-    err_dta <- map_df(coef_error, error_type, .id = "Replication")
-    names(err_dta)[2] <- "Error"
-
-    tp <- err_dta %>%
-      group_by(Replication, Response) %>%
-      top_n(-10, wt = Error) %>%
-      ungroup()
-
-    dta <- coef %>%
-      filter(Tuning_Param %in% unique(tp$Tuning_Param)) %>%
-      mutate_at(vars(Predictor, Response), get_integer) %>%
-      mutate(Predictor = ifelse(is.na(Predictor), 0, Predictor)) %>%
-      mutate_at(vars(Predictor, Response), as.integer)
-
+  coef_mat <- map(coef_mat, ~mutate_if(.x, is.factor, as.character))
+  n_rep <- length(coef_error)
+  
+  ## Grouping Variables ----
+  group_vars <- c('Predictor', 'Response')
+  
+  ## What if not shrinkage ----
+  if (!is_shrinkage) {
+    if (is.null(ncomp)) ncomp <- seq.int(0, 5) else if (length(ncomp) == 1) ncomp <- seq.int(0, ncomp)
+    coef_mat <- map(coef_mat, function(x){
+      as_tibble(x) %>% 
+        gather(Components, Estimated, -c(1:2, ncol(.))) %>% 
+        mutate_at('Components', ~as.integer(get_integer(.x))) %>% 
+        filter(Components %in% ncomp)
+    })
+    group_vars <- c('Predictor', 'Response', 'Components')
   } else {
-    coef <- coef %>%
-      mutate_at(vars(Predictor, Response), ~get_integer(.x)) %>%
-      mutate(Predictor = ifelse(is.na(Predictor), 0, Predictor)) %>%
-      mutate_at(vars(Predictor, Response, Tuning_Param), as.integer)
-
-    group_vars <- append(group_vars, "Tuning_Param")
-    dta <- coef %>% filter(Tuning_Param %in% ncomp)
+    err_df <- map(coef_error, paste0(err_type, '_error'))
+    err_df <- map(err_df, function(x) {
+      x %>% mutate(Response = paste0("Y", Response)) %>% 
+        rename_at(1, function(x) "Error") %>% 
+        group_by(Response) %>% 
+        filter(Error == min(Error))
+    })
+    coef_mat <- map2(coef_mat, err_df, function(x, y){
+      x %>% anti_join(y, by = c('Components' = 'Tuning_Param', 
+                                'Response' = 'Response'))
+    })
   }
-
-  dta <- dta %>%
-    gather(Est_type, Est_value, True, Coef) %>%
-    group_by_at(group_vars) %>%
-    rename(Component = Tuning_Param)
-
-  dta_avg <- dta %>%
-    summarize_at("Est_value", mean) %>%
-    ungroup() %>%
-    mutate(Est_type = case_when(
-      Est_type == "True" ~ "True",
-      Est_type == "Coef" ~ "Estimated")
-    )
-
+  
+  dta <- bind_rows(coef_mat, .id = "Replication") %>% 
+    mutate_at(vars(Predictor, Response), get_integer) %>%
+    mutate(Predictor = ifelse(is.na(Predictor), 0, Predictor)) %>%
+    mutate_at(vars(Replication, Predictor, Response), as.integer) %>% 
+    gather(Est_Type, Coef, True, Estimated) %>% 
+    group_by_at(group_vars) %>% 
+    group_by(Est_Type, add = TRUE) %>% 
+    summarize_at("Coef", mean)
+  
+  
   facet_form <- if (!is_shrinkage) {
-    as.formula(Response ~ Component)
+    as.formula(Response ~ Components)
   } else {
     as.formula(Response ~ .)
   }
-
+  
   prm <- attr(coef_error[[1]], "Sim_Properties")
   sub_title <- paste0("p:", prm$p, " gamma:", prm$gamma,
                       " eta:", prm$eta, " R2:", prm$R2)
   title <- paste("Method:", method)
   if (!not_nested) title <- paste(title, "Replicates:", n_rep)
-
-  plt <- dta_avg %>%
-    ggplot(aes(Predictor, Est_value, color = Est_type, group = Est_type)) +
-    geom_line(aes(linetype = Est_type)) +
-    geom_point(shape = 21, size = 0.7, color = "black", stroke = 0.5) +
+  
+  plt <- dta %>%
+    ggplot(aes(Predictor, Coef, color = Est_Type, group = Est_Type)) +
+    geom_line() +
+    geom_point(shape = 4, size = 0.7) +
     theme(legend.position = "bottom",
           plot.subtitle = element_text(family = "mono")) +
     labs(y = "Coefficient", color = NULL, linetype = NULL) +
@@ -417,7 +436,6 @@ coef_plot <- function(coef_error, ncomp = NULL, err_type = "prediction") {
 err_plot <- function(coef_error, error_type = "Prediction", ncomp = NULL) {
   not_nested <- "coefficient_error" %in% class(coef_error)
   if (not_nested) coef_error <- list(coef_error)
-
   METHOD <- map_chr(coef_error, attr, "Method") %>% unique()
   is_shrinkage <- METHOD %in% c("Ridge", "Lasso")
   error_df <- map_df(coef_error, .id = "Replication",
@@ -429,12 +447,12 @@ err_plot <- function(coef_error, error_type = "Prediction", ncomp = NULL) {
   dta <- error_df %>%
     mutate(Response = paste0("Y", Response))
   names(dta)[2] <- "Error"
-
+  
   prms <- attr(coef_error[[1]], "Sim_Properties")
   lbls <- prms[c('p', 'eta', 'gamma', 'R2')]
-
+  
   dgn_lbl <- with(lbls, paste0("p:", p, " eta:", eta, " gamma:", gamma, " R2:", R2))
-
+  
   lbl <- dta %>%
     group_by(Response, Tuning_Param) %>%
     summarize_at(2, mean) %>%
@@ -443,46 +461,46 @@ err_plot <- function(coef_error, error_type = "Prediction", ncomp = NULL) {
               Error = min(Error)) %>%
     mutate(label = paste0(Response, " = ", round(Error, 3), " (", Tuning_Param, ")")) %>%
     arrange(Error)
-
+  
   x_lab <- if (is_shrinkage) "Lambda" else "Number of Components"
-
+  
   if (!is_shrinkage) {
     dta <- dta %>%
       mutate(Tuning_Param = as.factor(as.integer(Tuning_Param)))
   }
-
+  
   plt <- dta %>%
     ggplot(aes(Tuning_Param, Error, fill = Response)) +
     stat_summary(fun.y = mean, geom = "line", size = 0.8,
                  aes(group = Response, color = Response))
   if (not_nested) {
     plt <- plt + stat_summary(fun.y = mean, geom = "point",  size = 1, shape = 21,
-                 aes(group = Response, fill = Response),
-                 stroke = 0.2)
+                              aes(group = Response, fill = Response),
+                              stroke = 0.2)
   }
   if (!is_shrinkage) {
     plt <- plt +
       stat_summary(fun.y = mean, geom = "point",  size = 2, shape = 21,
-                              aes(group = Response, fill = Response))
+                   aes(group = Response, fill = Response))
   }
   if (!not_nested & !is_shrinkage) {
     plt <- plt + geom_point(aes(color = Response),
-               position = position_jitterdodge(jitter.width = 0.2, jitter.height = 0.2),
-               alpha = 0.1) +
+                            position = position_jitterdodge(jitter.width = 0.2, jitter.height = 0),
+                            alpha = 0.1) +
       geom_boxplot(alpha = 0.2, color = "grey70", size = 0.3)
   }
   plt <- plt + labs(x = x_lab, y = paste(error_type, "Error"),
-         color = "Response", fill = "Response") +
+                    color = "Response", fill = "Response") +
     geom_text(data = lbl, aes(label = label, color = Response),
-              x = Inf, y = Inf, hjust = 1, vjust = seq(2, 8, 2),
+              x = Inf, y = Inf, hjust = 1, vjust = seq(2, 8, length.out = nrow(lbl)),
               family = "mono") +
     ggtitle(paste0(paste(error_type, "Error Plot:: "), "Method: ", METHOD),
             subtitle = dgn_lbl) +
     theme_light() +
     theme(plot.subtitle = element_text(family = "mono"),
           legend.position = "bottom")
-
-  return(plt)
+  
+  return(plt + expand_limits(y = 0))
 }
 
 ## Effect Plot ----
@@ -543,22 +561,22 @@ eff_plot <- function(term, model, title = "Prediction Error", show_errorbar = FA
           plot.subtitle = element_text(family = "mono")) +
     labs(x = trms[1], y = "Effect", color = trms[2]) +
     ggtitle(paste("Effect Plot:", title), subtitle = sub_title)
-
+  
   if (show_errorbar) plt <- plt +
     geom_errorbar(aes(ymin = lower, ymax = upper, width = 0.1))
   if (length(trms) > 1) plt <- plt +
     facet_grid(facet_formula, labeller = label_both)
   if ("Method" %in% trms) plt <- plt +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
-
+  
   return(plt)
 }
 
 # ## ---- Very IMPURE Functions ----
 # ## Coefficient Plot ----
-# get_coef <- function(design, method, path = "scripts/robj/coef-error") {
+# get_coef <- function(design, method) {
 #   out <- map_df(design, function(dgn){
-#     fname <- paste0(file.path(path, "dgn-"), dgn, "-", tolower(method), ".Rdata")
+#     fname <- paste0("scripts/robj/coef-error/dgn-", dgn, "-", tolower(method), ".Rdata")
 #     load(fname)
 #     is_shrinkage <- method %in% c("Ridge", "Lasso")
 #     out <- map_df(out, function(x) {
@@ -572,17 +590,15 @@ eff_plot <- function(term, model, title = "Prediction Error", show_errorbar = FA
 #   }, .id = "Design")
 #   return(as_tibble(out))
 # }
-# coef_plot <- function(design, method, ncomp = ifelse(method == "Yenv", 3, 7), 
-#                       error_type = "prediction", path = 'scripts/robj/coef-error',
-#                       design_chr = design_chr) {
+# coef_plot <- function(design, method, ncomp = ifelse(method == "Yenv", 3, 7), error_type = "prediction") {
 #   ncomp <- if (length(ncomp) == 1) 1:ncomp
 #   dgn <- as.character(design)
-#   coef <- get_coef(dgn, method, path = path) %>%
+#   coef <- get_coef(dgn, method) %>%
 #     mutate_at(vars(Predictor, Response), ~as.integer(get_integer(.x)))
-# 
+#   
 #   is_shrinkage <- method %in% c("Ridge", "Lasso")
 #   group_vars <- c("Design", "Predictor", "Response", "Est_type")
-# 
+#   
 #   if (is_shrinkage) {
 #     err_dta_chr <- switch(error_type, prediction = "pred_error", estimation = "est_error")
 #     if (!exists(err_dta_chr)) stop("Load prediction and estimation error data frame first!")
@@ -602,12 +618,12 @@ eff_plot <- function(term, model, title = "Prediction Error", show_errorbar = FA
 #     dta <- coef %>%
 #       filter(Tuning_Param %in% ncomp)
 #   }
-# 
+#   
 #   dta <- dta %>%
 #     gather(Est_type, Est_value, True, Coef) %>%
 #     group_by_at(group_vars) %>%
 #     rename(Component = Tuning_Param)
-# 
+#   
 #   dta_avg <- dta %>%
 #     summarize_at("Est_value", mean) %>%
 #     ungroup() %>%
@@ -615,7 +631,7 @@ eff_plot <- function(term, model, title = "Prediction Error", show_errorbar = FA
 #       Est_type == "True" ~ "True",
 #       Est_type == "Coef" ~ "Estimated")
 #     )
-# 
+#   
 #   facet_form <- if (!is_shrinkage) {
 #     as.formula(Response ~ Component)
 #   } else {
@@ -625,7 +641,7 @@ eff_plot <- function(term, model, title = "Prediction Error", show_errorbar = FA
 #     paste0("p: ", p, ", relpos: ", relpos,
 #            ", gamma: ", gamma, ", eta: ", eta, ", R2: ", R2)
 #   })
-# 
+#   
 #   plt <- dta_avg %>%
 #     ggplot(aes(Predictor, Est_value, color = Est_type, group = Est_type)) +
 #     geom_line() + geom_point(shape = 21, size = 0.7) +
@@ -684,5 +700,45 @@ eff_plot <- function(term, model, title = "Prediction Error", show_errorbar = FA
 #               aes(label = label, color = Response),
 #               inherit.aes = FALSE, hjust = 1, vjust = v_just) +
 #     geom_point(data = dta_min, fill = "white", shape = 21)
+#   return(plt)
+# }
+# ## Effect Plot ----
+# eff_plot <- function(term, model, title = "Prediction Error", show_errorbar = FALSE){
+#   trms <- strsplit(term, ":")[[1]]
+#   order <- length(trms)
+#   possible_terms <- unlist(combinat::permn(trms, fun = paste0, collapse = ":"))
+#   term_labels <- attr(model$terms, "term.labels")
+#   term <- possible_terms[possible_terms %in% term_labels]
+#   eff_df <- map_df(suppressMessages(effects::effect(term, model)),
+#                    as.data.frame, .id = "Response") %>%
+#     as.tibble()
+#   if ("Method" %in% trms) {
+#     mthd_idx <- which(trms %in% "Method")
+#     trms <- c(trms[mthd_idx], trms[-mthd_idx])
+#   }
+#   facet_formula <- if (length(trms) == 3) {
+#     paste(c("Response", trms[-c(1:2)]), collapse = " ~ ")
+#   } else if (length(trms) == 2) {
+#     paste(c(".", c("Response", trms[-c(1:2)])), collapse = " ~ ")
+#   } else {
+#     paste(c("Response", paste(trms[-c(1:2)], collapse = " + ")), collapse = " ~ ")
+#   }
+#   sub_title <- as.character(model$call)[2]
+#   plt <- eff_df %>%
+#     ggplot(aes(reorder(get(trms[1]), fit), fit,
+#                color = get(trms[2]), group = get(trms[2]))) +
+#     geom_line() + geom_point(size = 0.8) +
+#     theme(legend.position = "bottom",
+#           plot.subtitle = element_text(family = "mono")) +
+#     labs(x = trms[1], y = "Effect", color = trms[2]) +
+#     ggtitle(paste("Effect Plot:", title), subtitle = sub_title)
+#   
+#   if (show_errorbar) plt <- plt +
+#     geom_errorbar(aes(ymin = lower, ymax = upper, width = 0.1))
+#   if (length(trms) > 1) plt <- plt +
+#     facet_grid(facet_formula, labeller = label_both)
+#   if ("Method" %in% trms) plt <- plt +
+#     theme(axis.text.x = element_text(angle = 30, hjust = 1))
+#   
 #   return(plt)
 # }

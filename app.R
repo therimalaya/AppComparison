@@ -100,7 +100,9 @@ ui <- dashboardPage(
             dataTableOutput("selected_design"),
             fluidRow(
               fillRow(
+                flex = c(2, 2, 3),
                 textInput("rep", "Number of Replication", "1:5", width = '100%'),
+                textInput("ncomp", "Number of Components", "1:5", width = '100%'),
                 checkboxGroupInput(
                   inputId = "which_plot",
                   label = "Which Plot:",
@@ -108,7 +110,7 @@ ui <- dashboardPage(
                               "Estimation Error" = "est",
                               "Coefficients" = "coef"),
                   selected = c('pred', 'est')),
-                height = '80px'
+                height = '100px'
               )
             ),
             fluidRow(
@@ -241,18 +243,18 @@ server <- function(input, output) {
       )
     return(out)
   })
-
+  
   ## Selected design ----
   selected_design <- reactive({
     input[["design_rows_selected"]]
   })
-
+  
   ## output condition ----
   output$has_selected <- reactive(!is.null(selected_design()))
   outputOptions(output, "has_selected", suspendWhenHidden = FALSE)
   output$which_plot <- eventReactive(input$compare, input$which_plot)
   outputOptions(output, "which_plot", suspendWhenHidden = FALSE)
-
+  
   ## Selectd Designs Output ----
   output$selected_design <- DT::renderDataTable({
     req(!is.null(selected_design()))
@@ -272,10 +274,15 @@ server <- function(input, output) {
         color = "black"
       )
   })
-
+  
   ## Isolate Inputes ----
   rep <- eventReactive(input$compare, {
     out <- try(eval(parse(text = input$rep)), TRUE)
+    if ("try-error" %in% class(out)) return(1)
+    return(out)
+  })
+  ncomp <- eventReactive(input$compare, {
+    out <- try(eval(parse(text = input$ncomp)), TRUE)
     if ("try-error" %in% class(out)) return(1)
     return(out)
   })
@@ -316,9 +323,9 @@ server <- function(input, output) {
     dta <- load_data()
     lapply(dta, "[", rep())
   })
-
+  
   ## Main Plot UI for prediction and estimation errors and coefficients ----
-                    tab_ui <- eventReactive(input$compare, {
+  tab_ui <- eventReactive(input$compare, {
     mthds <- method()
     mdl_tabs <- lapply(mthds, function(mthd){
       dgn_tabs <- lapply(selected_design(), function(dgn){
@@ -361,13 +368,13 @@ server <- function(input, output) {
     })
     do.call(tabBox, c(mdl_tabs, id = "mdl_tab", width = '100%'))
   })
-
+  
   ## The main UI output ----
   output$my_ui <- renderUI({
     req(input$compare)
     tab_ui()
   })
-
+  
   ## Dynamically create plot based on selected criteria ----
   observeEvent(input$compare, {
     for (idx in design_name()) {
@@ -378,15 +385,15 @@ server <- function(input, output) {
         coef_key <- paste0("coef-", my_i)
         output[[est_key]] <- renderPlot({
           req('est' %in% which_plot())
-          filter_data()[[my_i]] %>% err_plot("Estimation")
+          filter_data()[[my_i]] %>% err_plot("Estimation", ncomp = ncomp())
         })
         output[[pred_key]] <- renderPlot({
           req('pred' %in% which_plot())
-          filter_data()[[my_i]] %>% err_plot("Prediction")
+          filter_data()[[my_i]] %>% err_plot("Prediction", ncomp = ncomp())
         })
         output[[coef_key]] <- renderPlot({
           req('coef' %in% which_plot())
-          filter_data()[[my_i]] %>% coef_plot()
+          filter_data()[[my_i]] %>% coef_plot(ncomp = ncomp())
         })
       })
     }
@@ -430,7 +437,7 @@ server <- function(input, output) {
   output$pred_anova <- renderPrint({
     anova(pred_model())
   })
-
+  
   ## Estimation Error Data ----
   est_data <- reactive({
     if (subset() != "") {
@@ -439,7 +446,7 @@ server <- function(input, output) {
       est_data_minimum
     }
   })
-
+  
   ## Estimation Error Model ----
   est_model <- eventReactive(input$btn_model, {
     ## lm(model_formula(), data = est_data_minimum)
